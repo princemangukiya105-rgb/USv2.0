@@ -6,9 +6,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "bootstrap:super-admin": "npx tsx scripts/bootstrap-super-admin.ts"
   },
   "dependencies": {
+    "firebase": "^13.4.0",
+    "firebase-admin": "^14.5.1",
     "next": "16.4.6",
     "react": "19.3.0",
     "react-dom": "19.3.0"

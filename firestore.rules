@@ -1,0 +1,236 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================================
+    // GLOBAL DEFAULT DENY
+    // =========================================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // AUTHENTICATION & CUSTOM CLAIM HELPERS
+    // =========================================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isSuperAdmin() {
+      return isAuthenticated() && request.auth.token.role == 'super_admin';
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (request.auth.token.role == 'admin' || request.auth.token.role == 'super_admin');
+    }
+
+    function isMaintenanceTeam() {
+      return isAuthenticated() && request.auth.token.role == 'maintenance_team';
+    }
+
+    function isFieldWorker() {
+      return isAuthenticated() && request.auth.token.role == 'field_worker';
+    }
+
+    function isStaff() {
+      return isAuthenticated() && (
+        request.auth.token.role in ['super_admin', 'admin', 'maintenance_team', 'field_worker']
+      );
+    }
+
+    function isUserSelf(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // =========================================================================
+    // 1. USERS COLLECTION (Staff & Administrators)
+    // Document ID: Firebase Auth UID
+    // =========================================================================
+    match /users/{userId} {
+      // Users can read own profile; Admins and Super Admins can view all staff
+      allow read: if isUserSelf(userId) ||
+                     isAdmin() ||
+                     (isMaintenanceTeam() && resource.data.teamId == request.auth.token.teamId);
+
+      // Super Admin has unrestricted create/update/deactivate rights
+      allow create, update: if isSuperAdmin();
+
+      // Admin can manage maintenance_team and field_worker profiles,
+      // but CANNOT create, update, or elevate Super Admin or Admin accounts
+      allow create: if isAdmin() &&
+                    request.resource.data.role in ['maintenance_team', 'field_worker'] &&
+                    request.resource.data.status in ['Active', 'Deactivated', 'Disabled'];
+
+      allow update: if isAdmin() &&
+                    resource.data.role in ['maintenance_team', 'field_worker'] &&
+                    request.resource.data.role in ['maintenance_team', 'field_worker'] &&
+                    request.resource.data.status in ['Active', 'Deactivated', 'Disabled'];
+
+      // Users can update their own personal non-privilege fields (e.g. phone, lastLoginAt),
+      // but CANNOT modify their own role, status, or staff badge ID
+      allow update: if isUserSelf(userId) &&
+                    request.resource.data.role == resource.data.role &&
+                    request.resource.data.status == resource.data.status &&
+                    request.resource.data.staffId == resource.data.staffId;
+
+      // Permanent deletion of user accounts is prohibited to preserve historical audit logs & assignment records
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // 2. TEAMS COLLECTION (Maintenance Squads)
+    // =========================================================================
+    match /teams/{teamId} {
+      // All authenticated staff members can view team rosters and dispatch zones
+      allow read: if isStaff();
+
+      // Only Admins and Super Admins can configure teams
+      allow create, update: if isAdmin();
+
+      // Permanent deletion prohibited; deactivation (status: 'Inactive') is required
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // 3. COMPLAINTS COLLECTION
+    // Document ID: Sequential Complaint Reference ID (e.g. URJ-2026-000101)
+    // =========================================================================
+    match /complaints/{complaintId} {
+      // Super Admin and Admin can read all complaints
+      // Maintenance Team can read complaints assigned to their team ID
+      // Field Worker can read complaints assigned specifically to their UID or staff ID
+      allow read: if isAdmin() ||
+                     (isMaintenanceTeam() && resource.data.assignedTeamId == request.auth.token.teamId) ||
+                     (isFieldWorker() && (
+                       resource.data.assignedWorkerId == request.auth.uid ||
+                       (request.auth.token.staffId != null && resource.data.assignedWorkerStaffId == request.auth.token.staffId)
+                     ));
+
+      // Client-side direct creation is blocked;
+      // Citizen complaint filing is executed via secure server-side API using atomic counter transaction
+      allow create: if false;
+
+      // Update access control by role:
+      allow update: if
+        // A. Admin / Super Admin: Full triage, assignment, approval and rejection authority
+        isAdmin() ||
+
+        // B. Maintenance Team Lead: Can dispatch/reassign lineman within their assigned squad
+        (isMaintenanceTeam() &&
+         resource.data.assignedTeamId == request.auth.token.teamId &&
+         // Squad Leads cannot reassign ticket to a different team
+         request.resource.data.assignedTeamId == resource.data.assignedTeamId &&
+         // Team Leads cannot approve resolution directly (requires Admin sign-off)
+         request.resource.data.status != 'Resolved') ||
+
+        // C. Field Worker: Strictly limited to their assigned ticket
+        (isFieldWorker() &&
+         (resource.data.assignedWorkerId == request.auth.uid ||
+          (request.auth.token.staffId != null && resource.data.assignedWorkerStaffId == request.auth.token.staffId)) &&
+         // Allowed worker lifecycle transitions
+         request.resource.data.status in ['Assigned', 'On the Way', 'Work Started', 'Work Completed'] &&
+         // Work Completed must never automatically become Resolved
+         request.resource.data.status != 'Resolved' &&
+         // Field workers cannot alter squad assignment or reassignment fields
+         request.resource.data.assignedWorkerId == resource.data.assignedWorkerId &&
+         request.resource.data.assignedTeamId == resource.data.assignedTeamId);
+
+      // Complaints cannot be permanently deleted from client (preserves public audit trails)
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // 4. ASSIGNMENTS COLLECTION (Historical Dispatch & Reassignment Records)
+    // =========================================================================
+    match /assignments/{assignmentId} {
+      // Authenticated staff can view assignment history
+      allow read: if isStaff();
+
+      // Created when an Admin or Team Lead assigns a work order
+      allow create: if isAdmin() ||
+                    (isMaintenanceTeam() && request.resource.data.teamId == request.auth.token.teamId);
+
+      // Append-only: Assignment history is strictly immutable
+      allow update, delete: if false;
+    }
+
+    // =========================================================================
+    // 5. COMPLAINT UPDATES (Timeline Milestones & Internal Directives)
+    // =========================================================================
+    match /complaintUpdates/{updateId} {
+      // Admins view all; Linemen and Squads view updates for their assigned tickets
+      allow read: if isAdmin() ||
+                     (isMaintenanceTeam() && request.auth.token.teamId != null) ||
+                     (isFieldWorker() && request.auth.uid != null);
+
+      // Staff can post progress milestones
+      allow create: if isStaff() && request.resource.data.actorUid == request.auth.uid;
+
+      // Milestone entries are tamper-proof and immutable
+      allow update, delete: if false;
+    }
+
+    // =========================================================================
+    // 6. PHOTOS COLLECTION (Citizen Evidence & Lineman Completion Proofs)
+    // =========================================================================
+    match /photos/{photoId} {
+      allow read: if isStaff();
+
+      // Field worker can log completion photos; server API creates citizen photos
+      allow create: if isStaff();
+
+      // Admins can adjust metadata; deletion blocked
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // 7. CATEGORIES COLLECTION (Electrical Hazard Types & SLA Rules)
+    // =========================================================================
+    match /categories/{categoryId} {
+      // Publicly readable so the citizen reporting form can display active categories
+      allow read: if true;
+
+      // Only Admins and Super Admins can manage categories
+      allow create, update: if isAdmin();
+
+      // Permanent deletion blocked; categories must be deactivated (isActive: false)
+      // to ensure historical complaints referencing them remain valid
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // 8. WEBSITE CONTENT (Homepage, Emergency Numbers, Announcements, Rules)
+    // =========================================================================
+    match /websiteContent/{contentDoc} {
+      // Publicly readable for citizen-facing civic information
+      allow read: if true;
+
+      // Super Admin alone has authority to edit public website text and notices
+      allow write: if isSuperAdmin();
+    }
+
+    // =========================================================================
+    // 9. AUDIT LOGS (Platform Operations & Security Event Ledger)
+    // =========================================================================
+    match /auditLogs/{logId} {
+      // Admins and Super Admins can view audit logs
+      allow read: if isAdmin();
+
+      // Authenticated staff actions can append an audit entry
+      allow create: if isStaff() && request.resource.data.actorId == request.auth.uid;
+
+      // Audit logs are tamper-proof: updates and deletions are strictly forbidden
+      allow update, delete: if false;
+    }
+
+    // =========================================================================
+    // 10. COUNTERS COLLECTION (Sequential Ticket ID Generation)
+    // =========================================================================
+    match /counters/{counterId} {
+      // Strictly accessed via Firebase Admin SDK in trusted server-side transactions;
+      // All direct client-side reads and writes are blocked
+      allow read, write: if false;
+    }
+  }
+}
