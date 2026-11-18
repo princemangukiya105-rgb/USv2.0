@@ -13,10 +13,16 @@ import { getAuth, Auth } from "firebase-admin/auth";
 import { getFirestore, Firestore } from "firebase-admin/firestore";
 import { getStorage, Storage } from "firebase-admin/storage";
 
-// 1. Enforce Server-Only Execution
+// 1. Enforce Server-Only Node.js Runtime Execution
 if (typeof window !== "undefined") {
   throw new Error(
     "[UrjaSetu Security Violation] Firebase Admin SDK cannot be executed on the client side."
+  );
+}
+
+if (process.env.NEXT_RUNTIME === "edge") {
+  throw new Error(
+    "[UrjaSetu Security Violation] Firebase Admin SDK cannot be executed in the Edge runtime. It must execute only in the Node.js server runtime."
   );
 }
 

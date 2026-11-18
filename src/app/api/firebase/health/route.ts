@@ -3,6 +3,7 @@ import {
   validateFirebaseAdminConfig,
   getFirebaseAdminApp,
   getAdminFirestore,
+  getAdminAuth,
 } from "@/lib/firebaseAdmin";
 
 export async function GET() {
@@ -26,7 +27,7 @@ export async function GET() {
     );
   }
 
-  // Attempt to initialize and verify Firestore connectivity
+  // Attempt to initialize and verify Firestore connectivity & Auth service
   try {
     const adminApp = getFirebaseAdminApp();
     if (!adminApp) {
@@ -41,6 +42,12 @@ export async function GET() {
         { status: 500 }
       );
     }
+
+    // Verify Firebase Admin Auth instance initialization
+    const adminAuthInstance = getAdminAuth();
+    const authReady = Boolean(
+      adminAuthInstance && typeof adminAuthInstance.verifyIdToken === "function"
+    );
 
     const db = getAdminFirestore();
 
@@ -57,13 +64,15 @@ export async function GET() {
         configured: true,
         projectId: validation.projectId,
         clientEmailMasked: validation.clientEmailMasked,
+        runtime: "nodejs",
         firestore: {
           connected: true,
           latencyMs,
           counterInitialized: counterDoc.exists,
         },
         auth: {
-          ready: true,
+          ready: authReady,
+          provider: "Firebase Admin Auth",
         },
         roundTripMs: Date.now() - startTime,
         timestamp: new Date().toISOString(),
